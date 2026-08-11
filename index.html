@@ -431,6 +431,7 @@
         </div>
         <div id="micTestStatus" style="font-size:0.8rem;color:#5b6863;margin-top:6px;">Say something — the bar should move as you speak.</div>
       </div>
+      <div style="font-size:0.78rem;color:#8a938e;margin-top:8px;">💡 For best accuracy: lay the phone flat on the table roughly equidistant between doctor and patient, away from AC vents or equipment noise, and try not to talk over each other.</div>
     </div>
 
     <div class="rec-controls">
@@ -581,6 +582,20 @@ const COMPREHENSIVE_TERMS = [
 ].join(", ");
 
 let recordedMimeType = 'audio/webm';
+
+// Requesting these explicitly (rather than plain {audio:true}) asks the
+// device/browser to apply real-time noise suppression and automatic gain
+// control to the built-in mic before we ever touch the audio — a free,
+// hardware-free improvement to signal quality. Echo cancellation is
+// disabled since there's no speaker output to cancel in this recording
+// scenario, and it can sometimes distort audio unnecessarily.
+const AUDIO_CAPTURE_CONSTRAINTS = {
+  audio: {
+    noiseSuppression: true,
+    autoGainControl: true,
+    echoCancellation: false
+  }
+};
 let wakeLock = null;
 let googleClientId = '';
 let clinicianName = '';
@@ -976,7 +991,7 @@ async function toggleMicTest(){
     return;
   }
   try{
-    micTestStream = await navigator.mediaDevices.getUserMedia({audio:true});
+    micTestStream = await navigator.mediaDevices.getUserMedia(AUDIO_CAPTURE_CONSTRAINTS);
   }catch(e){
     el('micTestMeterWrap').style.display = 'block';
     el('micTestStatus').textContent = 'Microphone permission was denied or unavailable.';
@@ -1089,7 +1104,7 @@ async function toggleRecording(){
       return;
     }
     try{
-      mediaStream = await navigator.mediaDevices.getUserMedia({audio:true});
+      mediaStream = await navigator.mediaDevices.getUserMedia(AUDIO_CAPTURE_CONSTRAINTS);
     }catch(e){
       el('status').textContent = 'Microphone permission was denied or unavailable.';
       return;
@@ -1274,23 +1289,31 @@ function showSpeakerAssignment(){
   const uniqueSpeakers = [...new Set(rawParagraphs.map(p=>p.speakerNum))];
   const box = el('speakerAssignBox');
   box.innerHTML = '';
+
+  const aiSplitBtn = document.createElement('button');
+  aiSplitBtn.className = 'primary';
+  aiSplitBtn.textContent = uniqueSpeakers.length === 1
+    ? 'Let AI split by conversation content instead'
+    : 'Not sure the split below is right? Let AI re-split by conversation content';
+  aiSplitBtn.style.marginBottom = '10px';
+  aiSplitBtn.onclick = runAiSpeakerSplit;
+  box.appendChild(aiSplitBtn);
+
   if(uniqueSpeakers.length === 1){
     const warn = document.createElement('div');
     warn.className = 'ai-flag';
     warn.innerHTML = 'Only one voice was detected in this recording — the AI couldn\'t tell doctor and patient apart by sound this time.';
-    box.appendChild(warn);
-
-    const aiSplitBtn = document.createElement('button');
-    aiSplitBtn.className = 'primary';
-    aiSplitBtn.textContent = 'Let AI split by conversation content instead';
-    aiSplitBtn.style.marginBottom = '16px';
-    aiSplitBtn.onclick = runAiSpeakerSplit;
-    box.appendChild(aiSplitBtn);
+    box.insertBefore(warn, aiSplitBtn);
 
     const orDiv = document.createElement('div');
     orDiv.style.cssText = 'font-size:0.8rem;color:#8a938e;margin-bottom:16px;';
     orDiv.textContent = 'Or assign the single detected voice manually below, then use the ⇄ icon on each transcript line afterward to fix individual lines.';
     box.appendChild(orDiv);
+  } else {
+    const hint = document.createElement('div');
+    hint.style.cssText = 'font-size:0.8rem;color:#8a938e;margin-bottom:16px;';
+    hint.textContent = 'Voice-based splitting can be unreliable with background noise — if the transcript below looks mislabeled, the button above re-splits it based on what was actually said instead of how it sounded.';
+    box.appendChild(hint);
   }
   uniqueSpeakers.forEach(num=>{
     const sample = rawParagraphs.find(p=>p.speakerNum === num);
@@ -1483,7 +1506,11 @@ async function generateNote(){
     ? transcriptLines.map(l => l.text).join('\n')
     : transcriptLines.map(l => `[${l.speaker.toUpperCase()}] ${l.text}`).join('\n');
 
-  const sharedRules = `Translate all Arabic content faithfully into English, preserving already-English medical terms exactly as given (do not alter or "correct" them). Be concise, clinical, and precise. Do not invent details not present in the transcript. If a section has no relevant content, write "Not documented in this session."`;
+  const sharedRules = `Translate all Arabic content faithfully into English, preserving already-English medical terms exactly as given (do not alter or "correct" them). Be concise, clinical, and precise. Do not invent details not present in the transcript. If a section has no relevant content, write "Not documented in this session."
+
+CRITICAL — transcript quality self-check: before writing the note, assess how much of the transcript is coherent, intelligible Arabic/English versus fragmented, garbled, or nonsensical text (a known limitation of automatic speech recognition on real clinic audio). If a meaningful portion of the transcript is too garbled to confidently extract clinical meaning from, you MUST start your entire response with a line exactly like:
+"⚠️ TRANSCRIPT QUALITY WARNING: [1-2 sentences on what's unreliable — e.g. 'much of the patient's history section was too fragmented to transcribe reliably; treat Subjective details below with caution']"
+Then proceed with your best-effort note. Do not skip this warning to make the note look more polished — an honest low-confidence note is far more useful and safer than a confident-sounding one built on unreliable input. If the transcript is genuinely clear and coherent throughout, do not add any warning.`;
 
   const assessmentPrompt = `You are a clinical documentation assistant for a physical therapy clinic. You receive a speaker-tagged transcript of an INITIAL ASSESSMENT session conducted mostly in Arabic (sometimes mixed with English medical terminology). Produce a structured clinical note IN ENGLISH ONLY.
 
@@ -1568,7 +1595,7 @@ async function toggleVoiceNote(){
       }
       setVoiceNoteStatus('Requesting microphone…');
       try{
-        voiceNoteStream = await navigator.mediaDevices.getUserMedia({audio:true});
+        voiceNoteStream = await navigator.mediaDevices.getUserMedia(AUDIO_CAPTURE_CONSTRAINTS);
       }catch(e){
         setVoiceNoteStatus('Microphone permission was denied or unavailable: ' + (e.message || e.name || 'unknown'));
         return;
